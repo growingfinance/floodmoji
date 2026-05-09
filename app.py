@@ -283,6 +283,34 @@ def route():
     })
 
 
+@app.route("/compare", methods=["POST"])
+def compare():
+    data = request.get_json()
+    origin = data.get("origin")
+    destination = data.get("destination")
+
+    if not origin or not destination:
+        return jsonify({"error": "Origin and destination are required."}), 400
+
+    results = []
+    for mode in ["safe", "emg", "last"]:
+        results.append(solve_route_for_mode(mode, origin, destination))
+
+    recommended = None
+    for mode in ["safe", "emg", "last"]:
+        match = next((r for r in results if r["mode"] == mode and r["available"]), None)
+        if match:
+            recommended = match
+            break
+
+    return jsonify({
+        "results": results,
+        "recommended_mode": recommended["mode"] if recommended else None,
+        "recommended_mode_label": recommended["mode_label"] if recommended else "No route available"
+    })
+
+
+
 @app.route("/assistant", methods=["POST"])
 def assistant():
     data = request.get_json()
