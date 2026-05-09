@@ -15,14 +15,14 @@ load_dotenv(override=True)
 api_key = os.getenv("OPENAI_API_KEY")
 print("LOADED KEY:", repr(api_key[:15]) if api_key else "None")
 
-client = OpenAI(api_key=api_key)
+client = OpenAI(api_key=api_key) if api_key else None
 
 DATA_FOLDER = "data"
 
 NETWORK_FILES = {
-    "safe": "roads_safe.geojson",
-    "emg": "roads_emg.geojson",
-    "last": "roads_last.geojson"
+    "safe": "https://drive.google.com/uc?export=download&id=1UjCuaGNIwcFRiRXrA2sV6n573VgC2qLq",
+    "emg": "https://drive.google.com/uc?export=download&id=1hofJmi_BQAa8joHGBxoTn2NV3WgXTWOZ",
+    "last": "https://drive.google.com/uc?export=download&id=1Om3MW6u3kdyXnv6A1upmhwM8VHaAdqci"
 }
 
 MODE_LABELS = {
@@ -110,9 +110,8 @@ def add_linestring_to_graph(G, line, flood_class):
 
 def build_graph(mode):
     filename = NETWORK_FILES[mode]
-    path = os.path.join(DATA_FOLDER, filename)
 
-    gdf = gpd.read_file(path)
+    gdf = gpd.read_file(filename)
 
     if gdf.crs is None:
         gdf = gdf.set_crs(epsg=4326, allow_override=True)
@@ -235,25 +234,16 @@ def index():
 
 @app.route("/flood")
 def flood():
-    filename = "flood_display.geojson"
-    path = os.path.join(DATA_FOLDER, filename)
-
-    if not os.path.exists(path):
-        return jsonify({"error": "Missing file: flood_display.geojson"}), 404
-
-    return jsonify(load_geojson(filename))
+    flood_url = "https://drive.google.com/uc?export=download&id=1SHTHf1A0uUy10P-yVeHY0nRb8uUvi0eS"
+    gdf = gpd.read_file(flood_url)
+    return jsonify(json.loads(gdf.to_json()))
 
 
 @app.route("/boat")
 def boat():
-    filename = "boat_display.geojson"
-    path = os.path.join(DATA_FOLDER, filename)
-
-    if not os.path.exists(path):
-        return jsonify({"error": "Missing file: boat_display.geojson"}), 404
-
-    return jsonify(load_geojson(filename))
-
+    boat_url = "https://drive.google.com/uc?export=download&id=1JFNgVzfRMTTNayEMEZ8V_5Rp1tEP4u5N"
+    gdf = gpd.read_file(boat_url)
+    return jsonify(json.loads(gdf.to_json()))
 
 @app.route("/route", methods=["POST"])
 def route():
