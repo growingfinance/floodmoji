@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Hat Yai Flood-Aware Routing Prototype</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+  <div id="topbar">
+    <h2>Hat Yai Flood-Aware Routing Prototype</h2>
+    <p>Select a vehicle mode, then click once for origin and once for destination.</p>
+  </div>
+
+  <div id="controls">
+    <button onclick="setMode('safe')">🚗 Normal Car</button>
+    <button onclick="setMode('emg')">🚑 Rescue Vehicle</button>
+    <button onclick="setMode('last')">🚛 High-Clearance Truck</button>
+    <button onclick="toggleFloodLayer()">🌊 Flood Severity</button>
+    <button onclick="toggleBoatLayer()">🛥 Boat Access</button>
+    <button onclick="compareModes()">📊 Compare Modes</button>
+    <button onclick="openGuide()">ℹ️ Guide & Legend</button>
+    <button onclick="clearPoints()">↺ Clear</button>
+  </div>
+
+  <div id="info-panel">
+    <div class="info-box"><strong>Mode:</strong> <span id="info-mode">-</span></div>
+    <div class="info-box"><strong>Status:</strong> <span id="info-status">Waiting</span></div>
+    <div class="info-box"><strong>Route length:</strong> <span id="info-length">-</span></div>
+    <div class="info-box"><strong>Max flood on route:</strong> <span id="info-risk">-</span></div>
+  </div>
+
+  <div id="status">Choose a vehicle mode first.</div>
+
+  <div id="compare-panel" class="hidden">
+    <div id="compare-header">
+      <h3>Mode Comparison</h3>
+      <div id="compare-recommendation">Recommendation: -</div>
+    </div>
+    <div id="compare-cards"></div>
+  </div>
+
+  <div id="map"></div>
+
+  <div id="guide-modal">
+    <div id="guide-card">
+      <div id="guide-header">
+        <h3>Guide & Legend</h3>
+        <button id="close-guide" onclick="closeGuide()">✕</button>
+      </div>
+
+      <div class="guide-section">
+        <h4>Vehicle Modes</h4>
+        <div class="guide-grid">
+          <div class="help-box">
+            <strong>🚗 Normal Car</strong><br>
+            Avoids deeper flooded roads. Best for ordinary users.
+          </div>
+
+          <div class="help-box">
+            <strong>🚑 Rescue Vehicle</strong><br>
+            Allows more flooded roads when urgent access is needed.
+          </div>
+
+          <div class="help-box">
+            <strong>🚛 High-Clearance Truck</strong><br>
+            Can use deeper flooded roads than normal vehicles.
+          </div>
+
+          <div class="help-box">
+            <strong>🛥 Boat Access</strong><br>
+            Shows roads too deeply flooded for normal driving.
+          </div>
+        </div>
+      </div>
+
+      <div class="guide-section">
+        <h4>Legend</h4>
+        <div class="guide-grid">
+          <div class="legend-item"><span class="swatch low"></span> Low flood</div>
+          <div class="legend-item"><span class="swatch medium"></span> Medium flood</div>
+          <div class="legend-item"><span class="swatch high"></span> High flood</div>
+          <div class="legend-item"><span class="swatch boat"></span> Boat access</div>
+          <div class="legend-item"><span class="swatch route"></span> Recommended route</div>
+        </div>
+      </div>
+
+      <div class="guide-section">
+        <h4>Note</h4>
+        <div class="help-box">
+          Route suggestions are based on available flood data and should support, not replace, driver judgment.
+        </div>
+      </div>
+    </div>
+  </div>
+<div id="assistant-fab" onclick="toggleAssistant()">💬</div>
+
+<div id="assistant-panel" class="hidden">
+  <div id="assistant-header">
+    <strong>🤖 Flood Help Assistant</strong>
+    <button onclick="toggleAssistant()">✕</button>
+  </div>
+
+  <div id="assistant-messages">
+    <div class="assistant-msg bot">
+      Hello. I can help with flood safety, route modes, evacuation advice, and emergency contact numbers.
+    </div>
+  </div>
+
+  <div id="assistant-input-row">
+    <input type="text" id="assistant-input" placeholder="Ask about floods, routes, or emergency help..." />
+    <button onclick="sendAssistantMessage()">Send</button>
+  </div>
+</div>
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script>
+    const HATYAI_CENTER = [7.008, 100.474];
+    const DEFAULT_ZOOM = 12;
+
+    const map = L.map('map').setView(HATYAI_CENTER, DEFAULT_ZOOM);
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap contributors',
+      maxZoom: 19
+    }).addTo(map);
+
+    let currentMode = null;
+
+    let floodLayer = null;
+    let boatLayer = null;
+    let floodVisible = false;
+    let boatVisible = false;
+
+    let routeOutlineLayer = null;
+    let routeLayer = null;
+
+    let originMarker = null;
+    let destinationMarker = null;
+    let originLatLng = null;
+    let destinationLatLng = null;
+    let clickStep = 0;
+
+    function refreshMap() {
+      setTimeout(() => map.invalidateSize(), 100);
+    }
+
+    function modeLabel(mode) {
+      if (mode === "safe") return "🚗 Normal Car";
+      if (mode === "emg") return "🚑 Rescue Vehicle";
+      if (mode === "last") return "🚛 High-Clearance Truck";
+      return "-";
+    }
+
+    function updateInfoPanel(mode = "-", status = "Waiting", length = "-", risk = "-") {
+      document.getElementById("info-mode").textContent = mode;
+      document.getElementById("info-status").textContent = status;
+      document.getElementById("info-length").textContent = length;
+      document.getElementById("info-risk").textContent = risk;
+    }
+
+    function floodColor(feature) {
+      const cls = feature.properties.flood3;
+      if (cls === "low") return "#7ec8ff";
+      if (cls === "medium") return "#005bbb";
+      if (cls === "high") return "#d62828";
+      return "#000000";
+    }
+
+    function openGuide() {
+      document.getElementById("guide-modal").classList.add("show");
+    }
+
+    function closeGuide() {
+      document.getElementById("guide-modal").classList.remove("show");
+    }
+
+    window.addEventListener("click", function(e) {
+      const modal = document.getElementById("guide-modal");
+      if (e.target === modal) closeGuide();
+    });
+
+    window.addEventListener("load", refreshMap);
+    window.addEventListener("resize", refreshMap);
+
+    function setMode(mode) {
+      currentMode = mode;
+      clearPoints(false);
+
+      document.getElementById("status").textContent =
+        modeLabel(mode) + " selected. Click origin, then destination.";
+
+      updateInfoPanel(modeLabel(mode), "Waiting for points", "-", "-");
+    }
+
+    function clearPoints(resetMessage = true) {
+      if (originMarker) {
+        map.removeLayer(originMarker);
+        originMarker = null;
+      }
+
+      if (destinationMarker) {
+        map.removeLayer(destinationMarker);
+        destinationMarker = null;
+      }
+
+      if (routeLayer) {
+        map.removeLayer(routeLayer);
+        routeLayer = null;
+      }
+
+      if (routeOutlineLayer) {
+        map.removeLayer(routeOutlineLayer);
+        routeOutlineLayer = null;
+      }
+
+      originLatLng = null;
+      destinationLatLng = null;
+      clickStep = 0;
+
+      if (resetMessage) {
+        document.getElementById("status").textContent =
+          currentMode
+            ? "Points cleared. Click origin, then destination."
+            : "Choose a vehicle mode first.";
+      }
+
+      document.getElementById("compare-panel").classList.add("hidden");
+      document.getElementById("compare-cards").innerHTML = "";
+      document.getElementById("compare-recommendation").textContent = "Recommendation: -";
+
+      updateInfoPanel(
+        currentMode ? modeLabel(currentMode) : "-",
+        currentMode ? "Waiting for points" : "Waiting",
+        "-",
+        "-"
+      );
+
+      map.setView(HATYAI_CENTER, DEFAULT_ZOOM);
+      refreshMap();
+    }
+
+    async function toggleFloodLayer() {
+      const statusBox = document.getElementById("status");
+
+      if (floodVisible && floodLayer) {
+        map.removeLayer(floodLayer);
+        floodLayer = null;
+        floodVisible = false;
+        statusBox.textContent = "Flood severity layer hidden.";
+        return;
+      }
+
+      try {
+        const response = await fetch("/flood");
+        const data = await response.json();
+
+        if (!response.ok) {
+          statusBox.textContent = data.error || "Could not load flood layer.";
+          return;
+        }
+
+        floodLayer = L.geoJSON(data, {
+          style: function(feature) {
+            return {
+              color: floodColor(feature),
+              weight: 3,
+              opacity: 0.75
+            };
+          }
+        }).addTo(map);
+
+        floodVisible = true;
+        statusBox.textContent = "Flood severity layer shown.";
+
+        if (routeOutlineLayer) routeOutlineLayer.bringToFront();
+        if (routeLayer) routeLayer.bringToFront();
+      } catch (error) {
+        statusBox.textContent = "Error loading flood layer.";
+        console.error(error);
+      }
+    }
+
+    async function toggleBoatLayer() {
+      const statusBox = document.getElementById("status");
+
+      if (boatVisible && boatLayer) {
+        map.removeLayer(boatLayer);
+        boatLayer = null;
+        boatVisible = false;
+        statusBox.textContent = "Boat access layer hidden.";
+        return;
+      }
+
+      try {
+        const response = await fetch("/boat");
+        const data = await response.json();
+
+        if (!response.ok) {
+          statusBox.textContent = data.error || "Could not load boat layer.";
+          return;
+        }
+
+        boatLayer = L.geoJSON(data, {
+          style: {
+            color: "#7b2cbf",
+            weight: 4,
+            opacity: 0.9,
+            dashArray: "8,6"
+          }
+        }).addTo(map);
+
+        boatVisible = true;
+        statusBox.textContent = "Boat access layer shown.";
+
+        if (routeOutlineLayer) routeOutlineLayer.bringToFront();
+        if (routeLayer) routeLayer.bringToFront();
+      } catch (error) {
+        statusBox.textContent = "Error loading boat layer.";
+        console.error(error);
+      }
+    }
+
+    async function requestRoute() {
+      const statusBox = document.getElementById("status");
+      statusBox.textContent = "Calculating route...";
+      updateInfoPanel(modeLabel(currentMode), "Calculating", "-", "-");
+
+      try {
+        const response = await fetch("/route", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            mode: currentMode,
+            origin: { lat: originLatLng.lat, lng: originLatLng.lng },
+            destination: { lat: destinationLatLng.lat, lng: destinationLatLng.lng }
+          })
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          statusBox.textContent = data.error || "Routing failed.";
+          updateInfoPanel(modeLabel(currentMode), "Failed", "-", "-");
+          return;
+        }
+
+        if (routeLayer) map.removeLayer(routeLayer);
+        if (routeOutlineLayer) map.removeLayer(routeOutlineLayer);
+
+        routeOutlineLayer = L.geoJSON(data, {
+          style: {
+            color: "#111111",
+            weight: 8,
+            opacity: 0.95
+          }
+        }).addTo(map);
+
+        routeLayer = L.geoJSON(data, {
+          style: {
+            color: "#ffd60a",
+            weight: 5,
+            opacity: 1
+          }
+        }).addTo(map);
+
+        routeOutlineLayer.bringToFront();
+        routeLayer.bringToFront();
+
+        if (routeLayer.getBounds().isValid()) {
+          map.fitBounds(routeLayer.getBounds(), { padding: [40, 40], maxZoom: 16 });
+        }
+
+        const props = data.properties || {};
+        const lengthText = props.length_km ? `${props.length_km} km` : "-";
+
+        refreshMap();
+        statusBox.textContent = "Route found successfully.";
+        updateInfoPanel(
+          props.mode_label || modeLabel(currentMode),
+          props.status || "Route found",
+          lengthText,
+          props.max_risk_label || "-"
+        );
+      } catch (error) {
+        document.getElementById("status").textContent = "Routing error.";
+        updateInfoPanel(modeLabel(currentMode), "Error", "-", "-");
+        console.error(error);
+      }
+    }
+
+    async function compareModes() {
+      const statusBox = document.getElementById("status");
+
+      if (!originLatLng || !destinationLatLng) {
+        statusBox.textContent = "Please select origin and destination first.";
+        return;
+      }
+
+      statusBox.textContent = "Comparing all vehicle modes...";
+
+      try {
+        const response = await fetch("/compare", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            origin: { lat: originLatLng.lat, lng: originLatLng.lng },
+            destination: { lat: destinationLatLng.lat, lng: destinationLatLng.lng }
+          })
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          statusBox.textContent = data.error || "Comparison failed.";
+          return;
+        }
+
+        const panel = document.getElementById("compare-panel");
+        const cards = document.getElementById("compare-cards");
+        const rec = document.getElementById("compare-recommendation");
+
+        cards.innerHTML = "";
+        rec.textContent = "Recommendation: " + (data.recommended_mode_label || "-");
+
+        data.results.forEach(item => {
+          const card = document.createElement("div");
+          card.className = "compare-card";
+
+          if (item.available) {
+            card.innerHTML = `
+              <div class="compare-title">${item.mode_label}</div>
+              <div><strong>Status:</strong> Available</div>
+              <div><strong>Length:</strong> ${item.length_km} km</div>
+              <div><strong>Max flood:</strong> ${item.max_risk_label}</div>
+              <div><strong>Low / Medium / High:</strong> ${item.exposure_km.low} / ${item.exposure_km.medium} / ${item.exposure_km.high} km</div>
+            `;
+          } else {
+            card.innerHTML = `
+              <div class="compare-title">${item.mode_label}</div>
+              <div><strong>Status:</strong> No route</div>
+            `;
+          }
+
+          cards.appendChild(card);
+        });
+
+        panel.classList.remove("hidden");
+        statusBox.textContent = "Mode comparison ready.";
+      } catch (error) {
+        statusBox.textContent = "Comparison error.";
+        console.error(error);
+      }
+    }
+
+    map.on("click", function(e) {
+      const statusBox = document.getElementById("status");
+
+      if (!currentMode) {
+        statusBox.textContent = "Please choose a vehicle mode first.";
+        return;
+      }
+
+      if (clickStep === 0) {
+        if (originMarker) map.removeLayer(originMarker);
+
+        originLatLng = e.latlng;
+        originMarker = L.marker(e.latlng).addTo(map).bindPopup("Origin").openPopup();
+
+        clickStep = 1;
+        statusBox.textContent = "Origin selected. Now click destination.";
+        updateInfoPanel(modeLabel(currentMode), "Origin selected", "-", "-");
+
+      } else if (clickStep === 1) {
+        if (destinationMarker) map.removeLayer(destinationMarker);
+
+        destinationLatLng = e.latlng;
+        destinationMarker = L.marker(e.latlng).addTo(map).bindPopup("Destination").openPopup();
+
+        clickStep = 2;
+        requestRoute();
+
+      } else {
+        clearPoints(false);
+
+        originLatLng = e.latlng;
+        originMarker = L.marker(e.latlng).addTo(map).bindPopup("Origin").openPopup();
+
+        clickStep = 1;
+        statusBox.textContent = "New origin selected. Now click destination.";
+        updateInfoPanel(modeLabel(currentMode), "Origin selected", "-", "-");
+      }
+    });
+
+
+
+function toggleAssistant() {
+  const panel = document.getElementById("assistant-panel");
+  panel.classList.toggle("hidden");
+}
+
+async function sendAssistantMessage() {
+  const input = document.getElementById("assistant-input");
+  const messages = document.getElementById("assistant-messages");
+  const text = input.value.trim();
+
+  if (!text) return;
+
+  const userMsg = document.createElement("div");
+  userMsg.className = "assistant-msg user";
+  userMsg.textContent = text;
+  messages.appendChild(userMsg);
+
+  input.value = "";
+  messages.scrollTop = messages.scrollHeight;
+
+  try {
+    const response = await fetch("/assistant", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ message: text })
+    });
+
+    const data = await response.json();
+
+    const botMsg = document.createElement("div");
+    botMsg.className = "assistant-msg bot";
+    botMsg.textContent = data.reply || "Sorry, I could not answer that.";
+    messages.appendChild(botMsg);
+
+    messages.scrollTop = messages.scrollHeight;
+  } catch (error) {
+    const botMsg = document.createElement("div");
+    botMsg.className = "assistant-msg bot";
+    botMsg.textContent = "Assistant error. Please try again.";
+    messages.appendChild(botMsg);
+
+    messages.scrollTop = messages.scrollHeight;
+  }
+}
+  </script>
+
+</body>
+</html>

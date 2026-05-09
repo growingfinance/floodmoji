@@ -1,0 +1,7 @@
+flask
+gunicorn
+geopandas
+networkx
+shapely
+python-dotenv
+openai
